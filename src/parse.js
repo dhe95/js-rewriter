@@ -36,11 +36,21 @@ function insertConsoleLog(ast) {
     ast['body'].unshift(makeConsoleLog('beginning of file'));
 }
 
-function processFile(file) {
-    var parsed = esprima.parse(file.toString());
+function processJs(js) {
+    var parsed = esprima.parse(js.toString());
     insertConsoleLog(parsed);
     return escodegen.generate(parsed);
 }
 
-generated = processFile(fs.readFileSync('testfile.js'));
-fs.writeFile('output.js', generated);
+function processHtml(document) {
+    var links = document.getElementsByTagName('a');
+    for (var i = 0; i < links.length; i++) {
+        links[i].setAttribute('target', '_blank');
+    }
+}
+
+
+exports.processJs = processJs;
+exports.processHtml = processHtml;
+//generated = processFile(fs.readFileSync('testfile.js'));
+//fs.writeFile('output.js', generated);
