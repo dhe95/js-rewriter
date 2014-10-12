@@ -2,7 +2,7 @@
  * Copyright (c) 2013 Max Schaefer.
  * Copyright (c) 2013 Samsung Information Systems America, Inc.
  * 
- * All rights reserved. This program and the accompanying materials
+ * All rights reserved. this program and the accompanying materials
  * are made available under the terms of the Eclipse Public License v1.0
  * which accompanies this distribution, and is available at
  * http://www.eclipse.org/legal/epl-v10.html
@@ -20,7 +20,9 @@ var http = require('http'),
     HTML5 = require('html5'),
     jsdom = require('jsdom'),
     assert = require("assert"),
-    https = require('https');
+    https = require('https'),
+    openport = require('openport'),
+    net = require('net');
 
 var core = jsdom.browserAugmentation(jsdom.level(3));
 
@@ -129,16 +131,6 @@ function walkDOM(node, url, rewriteJs, headerCode, headerURLs) {
 /**
  * rewrite all the scripts in the given html string, using the rewriteJs function
  */
-function rewriteHTML(html, url, jsRewriter, htmlRewriter, headerCode, headerURLs) {
-    assert(jsRewriter, "must pass a js rewriting function");
-    assert(htmlRewriter, "must pass a html rewriting function");
-    var document = impl.createDocument();
-    var parser = new HTML5.JSDOMParser(document, core);
-    parser.parse(html);
-    walkDOM(document, url, jsRewriter, headerCode, headerURLs);
-    htmlRewriter(document);
-    return document.innerHTML;
-}
 
 var server = null;
 
@@ -160,95 +152,159 @@ var server = null;
  *  JavaScript code for the response, or null if the request should be forwarded to the
  *  remote server.
  */
-function start(options) {
+var Server = function (options) {
     assert(options.jsRewriter, "must provide js rewriter function in options.rewriter");
     assert(options.htmlRewriter, "must provide html rewriter function in options.rewriter");
-    var headerCode = options.headerCode;
-    var headerURLs = options.headerURLs;
-    var rewriteJs = options.jsRewriter;
-    var rewriteHtml = options.htmlRewriter;
-    var intercept = options.intercept;
-    var noInstRegExp = options.noInstRegExp;
-    server = http.createServer(function (request, response) {
-        // make sure we won't get back gzipped stuff
-        delete request.headers['accept-encoding'];
-        console.log("request: " + request.url);
-        var interceptScript = intercept(request.url);
-        if (interceptScript) {
-            // send the script back directly
-            var iceptHeaders = {
-                'content-type': 'application/javascript',
-                'content-length': Buffer.byteLength(interceptScript, 'utf-8')
-            };
-            response.writeHead(200, iceptHeaders);
-            response.write(interceptScript);
-            response.end();
-            return;
-        }
-        var noInst = noInstRegExp && noInstRegExp.test(request.url);
-        var parsed = urlparser.parse(request.url);
-        var http_request_options = {
-            hostname: parsed.hostname,
-            path: parsed.path,
-            port: parsed.port ? parsed.port : 80,
-            method: request.method,
-            headers: request.headers
-        };
-        var proxyRequest = http.request(http_request_options, function (proxy_response) {
-            var tp = proxy_response.headers['content-type'] || "",
-            buf = "";
-            var url_path = parsed.pathname;
-            if (noInst) {
-                tp = "other";
-            } else if (tp.match(/JavaScript/i) || tp.match(/text/i) && url_path.match(/\.js$/i)) {
-                tp = "JavaScript";
-            } else if (tp.match(/HTML/i)) {
-                tp = "HTML";
-            } else {
-                tp = "other";
-            }
-            proxy_response.on('data', function (chunk) {
-                if (tp === "other") {
-                    response.write(chunk, 'binary');
-                } else {
-                    buf += chunk.toString();
-                }
-            });
-            proxy_response.on('end', function () {
-                var output;
-                if (tp === "JavaScript") {
-                    output = rewriteScript(buf, {
-                        type: 'script',
-                        inline: false,
-                        url: request.url,
-                        source: buf
-                    }, rewriteJs);
-                } else if (tp === "HTML") {
-                    output = rewriteHTML(buf, request.url, rewriteJs, rewriteHtml, headerCode, headerURLs);
-                }
-                if (output) {
-                    proxy_response.headers['content-length'] = Buffer.byteLength(output, 'utf-8');
-                    response.writeHead(proxy_response.statusCode, proxy_response.headers);
-                    response.write(output);
-                }
-                response.end();
-            });
-            if (tp === "other") {
-                response.writeHead(proxy_response.statusCode, proxy_response.headers);
-            }
-        });
-        proxyRequest.on('error', function (e) {
-            console.log("request error " + e.message);
-        });
-        request.on('data', function (chunk) {
-            proxyRequest.write(chunk, 'binary');
-        });
-        request.on('end', function () {
-            proxyRequest.end();
-        });
-    });
+    this.headerCode = options.headerCode;
+    this.headerURLs = options.headerURLs;
+    this.rewriteJs = options.jsRewriter;
+    this.rewriteHtml = options.htmlRewriter;
+    this.intercept = options.intercept;
+    this.noInstRegExp = options.noInstRegExp;
+    this.sslServers = {};
+    server = http.createServer();
+    server.on('connect', this._handleHttpConnect.bind(this)); 
+    server.on('request', this._handleHttpRequest.bind(this, false)); 
     var port = options.port ? options.port : 8080;
     server.listen(port);
 }
-exports.start = start;
-exports.rewriteHTML = rewriteHTML;
+
+
+Server.prototype.rewriteHTML = function (html, url, jsRewriter, htmlRewriter, headerCode, headerURLs) {
+    assert(jsRewriter, "must pass a js rewriting function");
+    assert(htmlRewriter, "must pass a html rewriting function");
+    var document = impl.createDocument();
+    var parser = new HTML5.JSDOMParser(document, core);
+    parser.parse(html);
+    walkDOM(document, url, jsRewriter, headerCode, headerURLs);
+    htmlRewriter(document);
+    return document.innerHTML;
+}
+
+Server.prototype._handleHttpConnect = function (request, socket, head) {
+    var self = this;
+    var parts = request.url.split(':', 2);
+    var host = parts[0];
+    var port = parts[1] || 80;
+    // make ssl server connection unless one exists already
+    if(port == 443) {
+        console.log('connection requested for ' + host + ':' + port);  
+        var sslServer = this.sslServers[host];
+        if(sslServer) {
+            console.log('using existing server for SSL');
+            makeConnection(sslServer.port);
+        } else {
+            // create https server, store it in sslservers
+            // load key + cert file, TODO: add error handling for file read
+            var options = {
+                key: fs.readFileSync(path.resolve('./keys/cert.key')),
+                cert: fs.readFileSync(path.resolve('./keys/cert.crt')),
+            };
+            openport.find(function (err, port) {
+                if(err) {console.log(error); return; }
+                else {
+                    console.log('starting https server for ' + host + ':' + port);
+                    var httpsServer = https.createServer(options);
+                    httpsServer.on('connect', self._handleHttpConnect.bind(self));
+                    httpsServer.on('request', self._handleHttpRequest.bind(self, true));
+                    httpsServer.listen(port, function() {
+                        self.sslServers[host] = { port: port, server: httpsServer}; 
+                    });
+                    makeConnection(port);
+                }
+            });
+        }
+    }
+
+    function makeConnection(port) {
+        var conn = net.connect(port, 'localhost', function() {
+            socket.write("HTTP/1.1 200 OK\r\n\r\n");
+            socket.pipe(conn);
+            return conn.pipe(socket);
+        });
+    }
+}
+
+
+Server.prototype._handleHttpRequest = function (isSSL, request, response) {
+    // make sure we won't get back gzipped stuff
+    var self = this;
+    delete request.headers['accept-encoding'];
+    var interceptScript = self.intercept(request.url);
+    if (interceptScript) {
+        // send the script back directly
+        var iceptHeaders = {
+            'content-type': 'application/javascript',
+            'content-length': Buffer.byteLength(interceptScript, 'utf-8')
+        };
+        response.writeHead(200, iceptHeaders);
+        response.write(interceptScript);
+        response.end();
+        return;
+    }
+    var noInst = self.noInstRegExp && self.noInstRegExp.test(request.url);
+    var parsed = urlparser.parse(request.url);
+    var http_request_options = {
+        //hostname: parsed.hostname,
+        hostname: request.headers.host,
+        path: parsed.path,
+        port: parsed.port ? parsed.port : isSSL ? 443 : 80,
+        method: request.method,
+        headers: request.headers
+    };
+    var proto = isSSL ? https : http
+    var proxyRequest = proto.request(http_request_options, function (proxy_response) {
+        var tp = proxy_response.headers['content-type'] || "",
+        buf = "";
+        var url_path = parsed.pathname;
+        if (noInst) {
+            tp = "other";
+        } else if (tp.match(/JavaScript/i) || tp.match(/text/i) && url_path.match(/\.js$/i)) {
+            tp = "JavaScript";
+        } else if (tp.match(/HTML/i)) {
+            tp = "HTML";
+        } else {
+            tp = "other";
+        }
+        proxy_response.on('data', function (chunk) {
+            if (tp === "other") {
+                response.write(chunk, 'binary');
+            } else {
+                buf += chunk.toString();
+            }
+        });
+        proxy_response.on('end', function () {
+            var output;
+            if (tp === "JavaScript") {
+                output = rewriteScript(buf, {
+                    type: 'script',
+                    inline: false,
+                    url: request.url,
+                    source: buf
+                }, self.rewriteJs);
+            } else if (tp === "HTML") {
+                output = self.rewriteHTML(buf, request.url, self.rewriteJs, self.rewriteHtml, self.headerCode, self.headerURLs);
+            }
+            if (output) {
+                proxy_response.headers['content-length'] = Buffer.byteLength(output, 'utf-8');
+                response.writeHead(proxy_response.statusCode, proxy_response.headers);
+                response.write(output);
+            }
+            response.end();
+        });
+        if (tp === "other") {
+            response.writeHead(proxy_response.statusCode, proxy_response.headers);
+        }
+    });
+    proxyRequest.on('error', function (e) {
+        console.log("request error " + e.message);
+    });
+    request.on('data', function (chunk) {
+        proxyRequest.write(chunk, 'binary');
+    });
+    request.on('end', function () {
+        proxyRequest.end();
+    });
+} 
+
+module.exports = function(options) { return new Server(options); };

@@ -1,4 +1,4 @@
-var proxy = require('./rewriting-proxy.js'),
+var Server = require('./rewriting-proxy.js'),
     parse = require('./parse.js');
 
 var PORT = 8501;
@@ -6,7 +6,7 @@ var PORT = 8501;
 
 function startProxy() {
     console.log('starting proxy on port ' +PORT);
-    proxy.start(
+    Server(
             { 
                 htmlRewriter: parse.processHtml,
                 jsRewriter: parse.processJs, 
@@ -14,4 +14,4 @@ function startProxy() {
                 port: PORT});
 }
 
-startProxy();
+exports.startProxy = startProxy;
