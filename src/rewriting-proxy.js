@@ -11,26 +11,27 @@
  *     Max Schaefer - initial API and implementation
  *     Manu Sridharan - refactoring and bug fixes
  *******************************************************************************/
-/*jslint node: true */
-/*global require console Buffer __dirname process*/
-var http = require('http'),
-    path = require('path'),
-    urlparser = require('url'),
-    fs = require('fs'),
-    HTML5 = require('html5'),
-    jsdom = require('jsdom'),
-    assert = require("assert"),
-    https = require('https'),
-    openport = require('openport'),
-    net = require('net');
+ /*jslint node: true */
+ /*global require console Buffer __dirname process*/
+ var http = require('http'),
+ path = require('path'),
+ urlparser = require('url'),
+ fs = require('fs'),
+ HTML5 = require('html5'),
+ jsdom = require('jsdom'),
+ assert = require("assert"),
+ https = require('https'),
+ openport = require('openport'),
+ pem = require('pem'),
+ net = require('net');
 
-var core = jsdom.browserAugmentation(jsdom.level(3));
+ var core = jsdom.browserAugmentation(jsdom.level(3));
 
-var impl = new core.DOMImplementation();
+ var impl = new core.DOMImplementation();
 
-var unparseable_count = 0;
+ var unparseable_count = 0;
 
-function rewriteScript(src, metadata, rewriteJs) {
+ function rewriteScript(src, metadata, rewriteJs) {
     var result;
     var prefix = "";
     if (src.match(/^javascript:/i)) {
@@ -49,13 +50,13 @@ function rewriteScript(src, metadata, rewriteJs) {
 }
 
 var script_counter = 0,
-    event_handler_counter = 0,
-    js_url_counter = 0;
+event_handler_counter = 0,
+js_url_counter = 0;
 // event handler attributes
 var event_handler_attribute_names = ["onabort", "onblur", "onchange", "onclick", "ondblclick",
-    "onerror", "onfocus", "onkeydown", "onkeypress", "onkeyup",
-    "onload", "onmousedown", "onmousemove", "onmouseout", "onmouseover",
-    "onmouseup", "onreset", "onresize", "onselect", "onsubmit", "onunload"
+"onerror", "onfocus", "onkeydown", "onkeypress", "onkeyup",
+"onload", "onmousedown", "onmousemove", "onmouseout", "onmouseover",
+"onmouseup", "onreset", "onresize", "onselect", "onsubmit", "onunload"
 ];
 // attributes that may contain URLs (unsure whether all of these can actually contain 'javascript:' URLs)
 var url_attribute_names = ["action", "cite", "code", "codebase", "data", "href", "manifest", "poster", "src"];
@@ -126,13 +127,13 @@ function walkDOM(node, url, rewriteJs, headerCode, headerURLs) {
     if (node.childNodes && node.childNodes.length)
         for (var i=0,n=node.childNodes.length;i<n;++i)
             walkDOM(node.childNodes[i], url, rewriteJs, headerCode, headerURLs);
-}
+    }
 
 /**
  * rewrite all the scripts in the given html string, using the rewriteJs function
  */
 
-var server = null;
+ var server = null;
 
 /**
  * starts up the instrumenting proxy.
@@ -152,7 +153,7 @@ var server = null;
  *  JavaScript code for the response, or null if the request should be forwarded to the
  *  remote server.
  */
-var Server = function (options) {
+ var Server = function (options) {
     assert(options.jsRewriter, "must provide js rewriter function in options.rewriter");
     assert(options.htmlRewriter, "must provide html rewriter function in options.rewriter");
     this.headerCode = options.headerCode;
@@ -191,7 +192,6 @@ Server.prototype._handleHttpConnect = function (request, socket, head) {
         console.log('connection requested for ' + host + ':' + port);  
         var sslServer = this.sslServers[host];
         if(sslServer) {
-            console.log('using existing server for SSL');
             makeConnection(sslServer.port);
         } else {
             // create https server, store it in sslservers
@@ -200,18 +200,21 @@ Server.prototype._handleHttpConnect = function (request, socket, head) {
                 key: fs.readFileSync(path.resolve('./keys/cert.key')),
                 cert: fs.readFileSync(path.resolve('./keys/cert.crt')),
             };
-            openport.find(function (err, port) {
-                if(err) {console.log(error); return; }
-                else {
-                    console.log('starting https server for ' + host + ':' + port);
-                    var httpsServer = https.createServer(options);
-                    httpsServer.on('connect', self._handleHttpConnect.bind(self));
-                    httpsServer.on('request', self._handleHttpRequest.bind(self, true));
-                    httpsServer.listen(port, function() {
-                        self.sslServers[host] = { port: port, server: httpsServer}; 
-                    });
-                    makeConnection(port);
-                }
+            pem.createCertificate({serviceKey:options.key, serviceCertificate:options.cert, serial: Date.now(), commonName:host}, function(err, keys) {
+                if(err) { console.log(err); return; }
+                openport.find(function (err, port) {
+                    if(err) {console.log(error); return; }
+                    else {
+                        console.log('starting https server for ' + host + ':' + port);
+                        var httpsServer = https.createServer({key: keys.clientKey, cert:keys.certificate});
+                        httpsServer.on('connect', self._handleHttpConnect.bind(self));
+                        httpsServer.on('request', self._handleHttpRequest.bind(self, true));
+                        httpsServer.listen(port, function() {
+                            self.sslServers[host] = { port: port, server: httpsServer}; 
+                        });
+                        makeConnection(port);
+                    }
+                });
             });
         }
     }
@@ -296,15 +299,15 @@ Server.prototype._handleHttpRequest = function (isSSL, request, response) {
             response.writeHead(proxy_response.statusCode, proxy_response.headers);
         }
     });
-    proxyRequest.on('error', function (e) {
-        console.log("request error " + e.message);
-    });
-    request.on('data', function (chunk) {
-        proxyRequest.write(chunk, 'binary');
-    });
-    request.on('end', function () {
-        proxyRequest.end();
-    });
+proxyRequest.on('error', function (e) {
+    console.log("request error " + e.message);
+});
+request.on('data', function (chunk) {
+    proxyRequest.write(chunk, 'binary');
+});
+request.on('end', function () {
+    proxyRequest.end();
+});
 } 
 
 module.exports = function(options) { return new Server(options); };
