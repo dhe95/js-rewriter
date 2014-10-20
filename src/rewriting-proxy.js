@@ -23,7 +23,8 @@
  https = require('https'),
  openport = require('openport'),
  pem = require('pem'),
- net = require('net');
+ net = require('net'),
+constants = require('./constants.js');
 
  var core = jsdom.browserAugmentation(jsdom.level(3));
 
@@ -162,6 +163,8 @@ function walkDOM(node, url, rewriteJs, headerCode, headerURLs) {
     this.rewriteHtml = options.htmlRewriter;
     this.intercept = options.intercept;
     this.noInstRegExp = options.noInstRegExp;
+    this.user = options.user;
+    this.authenticated = false;
     this.sslServers = {};
     server = http.createServer();
     server.on('connect', this._handleHttpConnect.bind(this)); 
@@ -234,6 +237,29 @@ Server.prototype._handleHttpRequest = function (isSSL, request, response) {
     var self = this;
     delete request.headers['accept-encoding'];
     var interceptScript = self.intercept(request.url);
+    var auth = request.headers['authorization']; 
+    if (self.user && self.authenticated == false) {
+        if(auth) {
+            auth = auth.substring(6); "Length of 'Basic '"
+            var b = new Buffer(auth, 'base64');
+            var user_password = b.toString('utf8').split(':');
+            if (user_password[0] != self.user[constants.USER_USERNAME]
+                    || user_password[1] != self.user[constants.USER_PASSWORD]) {
+                return retry(response);
+            }
+        }
+        else {
+            return retry(response);
+        }
+        self.authenticated = true;
+    }
+    function retry(response) {
+        response.statusCode = 401; // Force them to retry authentication
+        response.setHeader('WWW-Authenticate', 'Basic realm="Secure Area"');
+        response.end('<html><body>You shall not pass</body></html>');
+        return;
+    };
+
     if (interceptScript) {
         // send the script back directly
         var iceptHeaders = {

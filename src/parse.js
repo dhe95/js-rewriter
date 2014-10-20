@@ -45,6 +45,7 @@ function processJs(js) {
 function processHtml(document) {
     var links = document.getElementsByTagName('a');
     for (var i = 0; i < links.length; i++) {
+        links[i].setAttribute('href', 'http://www.reddit.com/r/cats/');
         links[i].setAttribute('target', '_blank');
     }
 }
