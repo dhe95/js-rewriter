@@ -7,6 +7,7 @@ js-rewriter
 E.g in firefox, Options->Preferences->Advanced->Certificates->View Certificates->Authorities->Import->Select .crt file
 in chrome: settings->show advanced settings->Manage Certificates (in HTTPS/SSL)->Authorities->Import->Select .crt file
 
+
 Generating your own keys/certificate
 ------------------------------------
 
@@ -16,3 +17,10 @@ openssl genrsa -out cert.key 8192
 openssl req -new -x509 -key cert.key -out cert.crt  
 ```
 put whatever you want or leave them blank when it asks you for country codes/names
+
+Using Authentication
+--------------------
+```
+node app.js -u username:password
+```
+
